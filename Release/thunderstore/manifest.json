@@ -1,0 +1,9 @@
+{
+  "name": "RealPortal",
+  "version_number": "1.0.4",
+  "website_url": "https://www.nexusmods.com/valheim/mods/4547",
+  "description": "Portals you can see and walk through: a live view of the destination and no loading screen. Works with every portal, keeps vanilla item rules, lets items, arrows and creatures pass, reach through. Multiplayer-ready.",
+  "dependencies": [
+    "denikson-BepInExPack_Valheim-5.4.2333"
+  ]
+}

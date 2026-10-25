@@ -1,0 +1,10 @@
+bin/
+obj/
+.vs/
+*.user
+Unity/Library/
+Unity/Temp/
+Unity/Logs/
+Unity/UserSettings/
+Unity/BurstBuild/
+Build/

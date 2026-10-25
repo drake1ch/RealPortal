@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>RealPortalEngine</AssemblyName>
+    <RootNamespace>RealPortal.Engine</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <!-- Override on the command line if the game or the r2modman profile live elsewhere. -->
+    <ValheimDir Condition="'$(ValheimDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Valheim</ValheimDir>
+    <BepInExDir Condition="'$(BepInExDir)' == ''">$(APPDATA)\r2modmanPlus-local\Valheim\profiles\Default\BepInEx</BepInExDir>
+    <ManagedDir>$(ValheimDir)\valheim_Data\Managed</ManagedDir>
+  </PropertyGroup>
+
+  <!-- Engine-level optimizations of the game itself (no portal logic): every one is a runtime feature flag,
+       so the lab can measure it A/B inside one session. Real Portal uses it, but it also runs on its own. -->
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(BepInExDir)\core\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="assembly_valheim" HintPath="$(ManagedDir)\assembly_valheim.dll" Private="false" />
+    <Reference Include="assembly_utils" HintPath="$(ManagedDir)\assembly_utils.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(ManagedDir)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(ManagedDir)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(ManagedDir)\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ParticleSystemModule" HintPath="$(ManagedDir)\UnityEngine.ParticleSystemModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AnimationModule" HintPath="$(ManagedDir)\UnityEngine.AnimationModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AudioModule" HintPath="$(ManagedDir)\UnityEngine.AudioModule.dll" Private="false" />
+    <Reference Include="Unity.Collections" HintPath="$(ManagedDir)\Unity.Collections.dll" Private="false" />
+    <Reference Include="Unity.Mathematics" HintPath="$(ManagedDir)\Unity.Mathematics.dll" Private="false" />
+  </ItemGroup>
+
+</Project>

@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <AssemblyName>RealPortal</AssemblyName>
+    <RootNamespace>RealPortal</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <!-- Override on the command line if the game or the r2modman profile live elsewhere. -->
+    <ValheimDir Condition="'$(ValheimDir)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Valheim</ValheimDir>
+    <BepInExDir Condition="'$(BepInExDir)' == ''">$(APPDATA)\r2modmanPlus-local\Valheim\profiles\Default\BepInEx</BepInExDir>
+    <ManagedDir>$(ValheimDir)\valheim_Data\Managed</ManagedDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The engine plugin (RealPortal.Features, where every window flag is registered): a hard BepInDependency,
+         installed as its own DLL, so it is not copied next to this one. -->
+    <ProjectReference Include="..\Engine\RealPortalEngine.csproj" Private="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Portal math, window mesh and renderer are shared with the Unity test project (with Runtime\Windows, the window
+         pipeline v2 parts). -->
+    <Compile Include="..\Unity\Assets\RealPortal\Runtime\**\*.cs" Link="Runtime\%(RecursiveDir)%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(BepInExDir)\core\BepInEx.dll" Private="false" />
+    <Reference Include="0Harmony" HintPath="$(BepInExDir)\core\0Harmony.dll" Private="false" />
+    <Reference Include="assembly_valheim" HintPath="$(ManagedDir)\assembly_valheim.dll" Private="false" />
+    <Reference Include="assembly_postprocessing" HintPath="$(ManagedDir)\assembly_postprocessing.dll" Private="false" />
+    <Reference Include="assembly_sunshafts" HintPath="$(ManagedDir)\assembly_sunshafts.dll" Private="false" />
+    <Reference Include="assembly_utils" HintPath="$(ManagedDir)\assembly_utils.dll" Private="false" />
+    <Reference Include="UnityEngine" HintPath="$(ManagedDir)\UnityEngine.dll" Private="false" />
+    <Reference Include="UnityEngine.CoreModule" HintPath="$(ManagedDir)\UnityEngine.CoreModule.dll" Private="false" />
+    <Reference Include="UnityEngine.PhysicsModule" HintPath="$(ManagedDir)\UnityEngine.PhysicsModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ImageConversionModule" HintPath="$(ManagedDir)\UnityEngine.ImageConversionModule.dll" Private="false" />
+    <Reference Include="UnityEngine.InputLegacyModule" HintPath="$(ManagedDir)\UnityEngine.InputLegacyModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ClothModule" HintPath="$(ManagedDir)\UnityEngine.ClothModule.dll" Private="false" />
+    <Reference Include="UnityEngine.ParticleSystemModule" HintPath="$(ManagedDir)\UnityEngine.ParticleSystemModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AudioModule" HintPath="$(ManagedDir)\UnityEngine.AudioModule.dll" Private="false" />
+    <Reference Include="UnityEngine.UIModule" HintPath="$(ManagedDir)\UnityEngine.UIModule.dll" Private="false" />
+    <Reference Include="UnityEngine.AssetBundleModule" HintPath="$(ManagedDir)\UnityEngine.AssetBundleModule.dll" Private="false" />
+  </ItemGroup>
+
+</Project>

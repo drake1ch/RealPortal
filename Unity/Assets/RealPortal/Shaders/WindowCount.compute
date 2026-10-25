@@ -1,0 +1,134 @@
+// Window occlusion counts and per-render depth statistics (Window Pipeline v2, Win.Occlusion; ARCHITECTURE-v2 section 4.8,
+// contract Docs\S2S3-CONTRACTS.md section 8.3). Both results are read back asynchronously (2 frames late) by WindowVisibility.
+//
+// CSClear      zero the 512 counts (8 groups of 64 threads).
+// CSCount      over the id texture the composite wrote (AUXMRT target 4 or WINDOWID): per window id (bits 0-7) its
+//              visible pixels into [id], and those a resolved view marked disoccluded (bit 15) into [256 + id]. 8x8
+//              tiles, counted into a groupshared histogram first, so the global buffer sees one atomic per tile and id.
+// CSStatsClear the 32 depth-stats entries to (asuint(FLT_MAX), 0, 0, 0).
+// CSDepthStats over one window render's linear depth (dispatched in its capture command buffer): nearest and farthest
+//              non-sky depth (float bits of non-negative values order like the values, so integer min/max work), how
+//              many texels see the world below the water level, and how many texels there are. Reduced per tile in
+//              groupshared memory first, then one atomic per tile and value.
+#pragma kernel CSClear
+#pragma kernel CSCount
+#pragma kernel CSStatsClear
+#pragma kernel CSDepthStats
+
+#define RP_COUNT_ENTRIES 512
+#define RP_STATS_SLOTS 32
+#define RP_FLT_MAX 3.402823466e+38
+
+// ---- Counts ---------------------------------------------------------------------------------------------------------
+RWStructuredBuffer<uint> _RP_Counts;   // [0..255] visible px per id, [256..511] disoccluded visible px per id
+Texture2D<uint> _RP_IdTex;             // R16_UInt: id | 0x8000 where disoccluded; 0 = no window
+uint4 _RP_IdSize;                      // width, height
+
+groupshared uint gs_bins[RP_COUNT_ENTRIES];
+
+[numthreads(64, 1, 1)]
+void CSClear(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < RP_COUNT_ENTRIES)
+        _RP_Counts[id.x] = 0;
+}
+
+[numthreads(8, 8, 1)]
+void CSCount(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    uint k;
+    for (k = gi; k < RP_COUNT_ENTRIES; k += 64)
+        gs_bins[k] = 0;
+    GroupMemoryBarrierWithGroupSync();
+
+    if (id.x < _RP_IdSize.x && id.y < _RP_IdSize.y)
+    {
+        uint v = _RP_IdTex.Load(int3(id.xy, 0));
+        uint window = v & 0xFF;
+        if (window != 0)
+        {
+            InterlockedAdd(gs_bins[window], 1);
+            if ((v & 0x8000) != 0)
+                InterlockedAdd(gs_bins[256 + window], 1);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    // A tile shows few windows: only the bins it touched go to the global buffer.
+    for (k = gi; k < RP_COUNT_ENTRIES; k += 64)
+    {
+        uint c = gs_bins[k];
+        if (c != 0)
+            InterlockedAdd(_RP_Counts[k], c);
+    }
+}
+
+// ---- Depth statistics ---------------------------------------------------------------------------------------------
+RWStructuredBuffer<uint> _RP_Stats;    // 4 per render: asuint(min z), asuint(max z), water px, valid px
+Texture2D<float> _RP_StatsDepth;       // the render's linear eye depth (far-side metres)
+uint4 _RP_StatsSize;                   // width, height, entry index, 0
+float4 _RP_StatsParams;                // sky depth (0.98 * far), water level (world y), 0, 0
+float4x4 _RP_StatsCamToWorld;          // the window camera's cameraToWorldMatrix at the render
+float4 _RP_StatsProj;                  // its projection as rendered (lens shift, jitter): m00, m11, m02, m12
+
+[numthreads(32, 1, 1)]
+void CSStatsClear(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x < RP_STATS_SLOTS)
+    {
+        uint b = id.x * 4;
+        _RP_Stats[b + 0] = asuint(RP_FLT_MAX);
+        _RP_Stats[b + 1] = 0;
+        _RP_Stats[b + 2] = 0;
+        _RP_Stats[b + 3] = 0;
+    }
+}
+
+groupshared uint gs_min, gs_max, gs_water, gs_valid;
+
+[numthreads(8, 8, 1)]
+void CSDepthStats(uint3 id : SV_DispatchThreadID, uint gi : SV_GroupIndex)
+{
+    if (gi == 0)
+    {
+        gs_min = asuint(RP_FLT_MAX);
+        gs_max = 0;
+        gs_water = 0;
+        gs_valid = 0;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (id.x < _RP_StatsSize.x && id.y < _RP_StatsSize.y)
+    {
+        float z = _RP_StatsDepth.Load(int3(id.xy, 0));
+        InterlockedAdd(gs_valid, 1);
+        if (z < _RP_StatsParams.x)
+        {
+            uint bits = asuint(max(z, 0.0));
+            InterlockedMin(gs_min, bits);
+            InterlockedMax(gs_max, bits);
+            // The texel's world point: render textures are stored with their bottom row first on every API Unity
+            // renders them for (it flips its projection on top-left APIs), so texel row y is uv.y = (y + 0.5) / h.
+            float2 uv = (float2(id.xy) + 0.5) / float2(_RP_StatsSize.xy);
+            float2 ndc = uv * 2 - 1;
+            float3 view = float3((ndc.x + _RP_StatsProj.z) * z / _RP_StatsProj.x, (ndc.y + _RP_StatsProj.w) * z / _RP_StatsProj.y, -z);
+            float3 world = mul(_RP_StatsCamToWorld, float4(view, 1)).xyz;
+            if (world.y < _RP_StatsParams.y)
+                InterlockedAdd(gs_water, 1);
+        }
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    if (gi == 0 && gs_valid != 0 && _RP_StatsSize.z < RP_STATS_SLOTS)
+    {
+        uint b = _RP_StatsSize.z * 4;
+        if (gs_min != asuint(RP_FLT_MAX))
+        {
+            InterlockedMin(_RP_Stats[b + 0], gs_min);
+            InterlockedMax(_RP_Stats[b + 1], gs_max);
+        }
+        if (gs_water != 0)
+            InterlockedAdd(_RP_Stats[b + 2], gs_water);
+        InterlockedAdd(_RP_Stats[b + 3], gs_valid);
+    }
+}

@@ -1,0 +1,44 @@
+<Project>
+
+  <!-- BepInEx 5 preloader patcher for the engine's ZDO journal (ZdoJournalModule; ARCHITECTURE-v2 §3.3, §5.2 E1).
+       It lives inside Engine\, so its build output is kept under Engine\bin and Engine\obj (which RealPortalEngine.csproj
+       already leaves out of its sources), and Preloader.cs compiles to nothing without REALPORTAL_PRELOADER: the engine
+       project picking it up by its default glob stays unaffected. The properties below must come before Sdk.props. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)..\obj\Preloader\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)..\bin\Preloader\</BaseOutputPath>
+  </PropertyGroup>
+
+  <Import Project="Sdk.props" Sdk="Microsoft.NET.Sdk" />
+
+  <PropertyGroup>
+    <!-- net40: the preloader runs before the game's netstandard facade is needed by anyone; BepInEx.dll is net35 and
+         its Mono.Cecil 0.10.4 is net40. -->
+    <TargetFramework>net40</TargetFramework>
+    <AssemblyName>RealPortal.Preloader</AssemblyName>
+    <RootNamespace>RealPortal.Preloader</RootNamespace>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <DefineConstants>$(DefineConstants);REALPORTAL_PRELOADER</DefineConstants>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- Override on the command line if the r2modman profile lives elsewhere. -->
+    <BepInExDir Condition="'$(BepInExDir)' == ''">$(APPDATA)\r2modmanPlus-local\Valheim\profiles\Default\BepInEx</BepInExDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Preloader.cs" />
+  </ItemGroup>
+
+  <!-- Only Cecil and BepInEx's logger. Never reference assembly_valheim here: loading it before the preloader patches
+       it would defeat the patch. -->
+  <ItemGroup>
+    <Reference Include="BepInEx" HintPath="$(BepInExDir)\core\BepInEx.dll" Private="false" />
+    <Reference Include="Mono.Cecil" HintPath="$(BepInExDir)\core\Mono.Cecil.dll" Private="false" />
+  </ItemGroup>
+
+  <Import Project="Sdk.targets" Sdk="Microsoft.NET.Sdk" />
+
+</Project>

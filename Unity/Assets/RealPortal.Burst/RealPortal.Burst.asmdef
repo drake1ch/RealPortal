@@ -1,0 +1,17 @@
+{
+    "name": "RealPortal.Burst",
+    "rootNamespace": "RealPortal.Burst",
+    "references": [
+        "Unity.Burst",
+        "Unity.Mathematics"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
