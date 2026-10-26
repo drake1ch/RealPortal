@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.5
+
+- **Faster windows.** Each window's far side costs less to draw: its static objects (trees, rocks, buildings drawn from the game's own meshes) are now sorted out on several threads at once, and as compiled Burst code with the library that comes with the mod, about a third of the time they took per window. The picture is the same; if the library cannot load, the same work runs as plain code.
+- Real Portal Engine 0.1.1 (in the package; this version needs it).
+
 ## 1.0.4
 
 - **Windows look exactly like the game.** Every window is refreshed every frame, and what it shows matches the place itself: creatures are present and moving in every window, far fires, smoke and Mistlands mist run at the game's own rate, far weather and wind (also from under a roof), grass from the first frame, lights and their shadows per place, reflections, shield domes and sun shafts in the far side's light. A far side you have not looked at for a while is woken up before you look again, so nothing is frozen or missing.

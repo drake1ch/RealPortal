@@ -24,6 +24,8 @@ namespace RealPortal.Burst
             Put(1, BurstJobs.ApiVersion);
             Put(2, UnsafeUtility.SizeOf<ProxyCullJob>());
             Put(3, UnsafeUtility.SizeOf<ProxyCompactJob>());
+            Put(4, UnsafeUtility.SizeOf<ProxyViewCullJob>());
+            Put(5, UnsafeUtility.SizeOf<ProxyViewEmitJob>());
         }
 
         // Within the caller's array only: the caller may come from another build with fewer slots.

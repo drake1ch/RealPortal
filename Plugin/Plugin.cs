@@ -15,14 +15,15 @@ namespace RealPortal
     // "Portal"-style portals for Valheim: every portal (vanilla wooden and stone ones, modded ones) shows the live
     // view of its partner, and players, creatures, dropped items and projectiles pass straight through it.
     [BepInPlugin(Guid, Name, Version)]
-    // The engine plugin carries the feature switches (RealPortal.Features) every window flag is registered in.
-    [BepInDependency(EngineGuid)]
+    // The engine plugin carries the feature switches (RealPortal.Features) every window flag is registered in, and from
+    // 0.1.1 the Burst build of the proxies' jobs (BurstBootstrapModule.ViewCull/ViewEmit).
+    [BepInDependency(EngineGuid, "0.1.1")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "valheim.realportal";
         public const string EngineGuid = "valheim.realportal.engine";
         public const string Name = "Real Portal";
-        public const string Version = "1.0.4";
+        public const string Version = "1.0.5";
 
         internal const string BundleFile = "realportal.bundle";
         internal const string ShaderAsset = "PortalWindow";

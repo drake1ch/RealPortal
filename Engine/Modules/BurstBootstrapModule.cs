@@ -73,7 +73,7 @@ namespace RealPortal.Engine
         public const string NativeFile = "RealPortal.Burst_win_x86_64.dll";
         public const string ManifestFile = "RealPortal.Burst.json";
         // RealPortal.Burst.BurstJobs.ApiVersion of the jobs this engine knows how to call.
-        public const int ApiVersion = 2;
+        public const int ApiVersion = 3;
         public const string DirVariable = "REALPORTAL_BURST_DIR";
         // Development fallback, only in lab runs (the bench sets RP_LAB_ROOT and deploys only the engine dll): where
         // BurstLibraryBuild copies the files. Never looked at on a player's machine.
@@ -113,6 +113,24 @@ namespace RealPortal.Engine
             NativeArray<int> batchCounts, NativeArray<int> visibleCount, int batchSize, JobHandle dependsOn);
 
         static CullScheduler s_burstCull;
+
+        // RealPortal.Burst's view jobs (the plugin's proxy cull and emission as Burst code, ProxyViewJobs.cs: their
+        // parameters there) and the sizes of the plugin types they mirror (BurstJobs.ViewSizes); null until activation
+        // passed every check. The plugin schedules them only while BurstActive, after comparing them with its own jobs.
+        public delegate JobHandle ViewCullScheduler(NativeArray<byte> page, NativeArray<byte> ranges, NativeArray<byte> templates, NativeArray<byte> lodSets,
+            NativeArray<byte> variants, NativeArray<byte> rowFlags, NativeArray<Vector4> planes, NativeArray<byte> outs, NativeArray<int> room,
+            int rangeBase, int rangeCount, int casterPlanes, int maxLod, uint skip, Vector4 cam, Vector4 prevCam, Vector4 light, int flags,
+            JobHandle dependsOn);
+
+        public delegate JobHandle ViewEmitScheduler(NativeArray<byte> page, NativeArray<byte> ranges, NativeArray<byte> cull, NativeArray<byte> variants,
+            NativeArray<byte> variantParts, NativeArray<byte> parts, NativeArray<int> batchDraw, NativeArray<int> bases, NativeArray<int> key,
+            NativeArray<Matrix4x4> m, NativeArray<Vector4> s, NativeArray<int> filled, NativeArray<int> visible, NativeArray<int> casters,
+            NativeArray<int> specialCount, NativeArray<int> special, NativeArray<int> rowDrawn, int rangeBase, int rangeCount, int mask, int frame,
+            bool obliqueClip, JobHandle dependsOn);
+
+        public static ViewCullScheduler ViewCull;
+        public static ViewEmitScheduler ViewEmit;
+        public static int[] ViewSizes;
         // Activation ran (whatever it found), and whether it found everything usable.
         static bool s_activated, s_usable;
         static int s_mainThread;
@@ -278,6 +296,11 @@ namespace RealPortal.Engine
                 return false;
             }
             s_burstCull = burstCull;
+            ViewCull = (ViewCullScheduler)Delegate.CreateDelegate(typeof(ViewCullScheduler),
+                jobs.GetMethod("ScheduleViewCull", BindingFlags.Public | BindingFlags.Static), true);
+            ViewEmit = (ViewEmitScheduler)Delegate.CreateDelegate(typeof(ViewEmitScheduler),
+                jobs.GetMethod("ScheduleViewEmit", BindingFlags.Public | BindingFlags.Static), true);
+            ViewSizes = (int[])jobs.GetMethod("ViewSizes", BindingFlags.Public | BindingFlags.Static).Invoke(null, null);
             Status = "Burst code runs";
             return true;
         }

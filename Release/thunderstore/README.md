@@ -26,7 +26,7 @@ The package also brings **Real Portal Engine**, a helper plugin with the optimiz
 ## Performance
 
 - **Light by default.** A portal opens when you come up to it (`PreloadDistance` 5 m, a few seconds) and closes as you walk off, and only the nearest one is open at a time (`MaxFarAreas` 1). With these settings a portal costs about as much as one more view of the game while you stand by it, and nothing once you have left it.
-- **The far side is lighter.** Its static objects (trees, rocks, buildings) beyond the place round the far portal are drawn straight from the game's own meshes and materials instead of being loaded as game objects: the same picture, about a third fewer objects in your game while a portal is open. Round the far portal everything is real and alive.
+- **The far side is lighter.** Its static objects (trees, rocks, buildings) beyond the place round the far portal are drawn straight from the game's own meshes and materials instead of being loaded as game objects: the same picture, about a third fewer objects in your game while a portal is open. Sorting them for each window runs on several threads at once, as compiled Burst code. Round the far portal everything is real and alive.
 - **Smooth opening.** Loading a far end is spread over frames (`ActivationBudgetMs`), so the frame rate holds while a portal opens.
 - **Want windows from afar or many portals at once?** Raise `PreloadDistance` (120 was the 1.0.3 default) and `MaxFarAreas` (0 = no limit). Each open far end then costs about as much as your own surroundings, and each window on screen about as much as one more view of the game.
 

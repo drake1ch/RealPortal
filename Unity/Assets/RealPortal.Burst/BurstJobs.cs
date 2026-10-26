@@ -3,6 +3,7 @@ using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
+using UnityEngine;
 
 namespace RealPortal.Burst
 {
@@ -20,8 +21,9 @@ namespace RealPortal.Burst
     // is what refuses it, so change the twin with the body.
     public static class BurstJobs
     {
-        // 2: ProxyCullJob is an IJobFor over batches; ProbeJobs.
-        public const int ApiVersion = 2;
+        // 2: ProxyCullJob is an IJobFor over batches; ProbeJobs. 3: ProxyViewCullJob and ProxyViewEmitJob (ScheduleViewCull,
+        // ScheduleViewEmit, ViewSizes).
+        public const int ApiVersion = 3;
 
         // Probe()[0] and ProbeJobs()[i]: which code ran.
         public const int ModeBurst = 1;
@@ -56,11 +58,21 @@ namespace RealPortal.Burst
             layout[0] = ApiVersion;
             layout[1] = UnsafeUtility.SizeOf<ProxyCullJob>();
             layout[2] = UnsafeUtility.SizeOf<ProxyCompactJob>();
+            layout[3] = UnsafeUtility.SizeOf<ProxyViewCullJob>();
+            layout[4] = UnsafeUtility.SizeOf<ProxyViewEmitJob>();
             return layout;
         }
 
         // The jobs ProbeJobs() reports on, in its order. A new job adds its name here and its probe to ProbeJobs.
-        public static readonly string[] JobNames = { nameof(ProxyCullJob), nameof(ProxyCompactJob) };
+        public static readonly string[] JobNames = { nameof(ProxyCullJob), nameof(ProxyCompactJob), nameof(ProxyViewCullJob), nameof(ProxyViewEmitJob) };
+
+        // The sizes of the plugin types' mirrors (ProxyViewJobs.cs): ViewInst, ViewRange, ViewOut, ViewTemplate,
+        // ViewVariant, ViewVariantPart, ViewPart. The plugin uses the view jobs only when each equals its own type's.
+        public static int[] ViewSizes() => new[]
+        {
+            UnsafeUtility.SizeOf<ViewInst>(), UnsafeUtility.SizeOf<ViewRange>(), UnsafeUtility.SizeOf<ViewOut>(), UnsafeUtility.SizeOf<ViewTemplate>(),
+            UnsafeUtility.SizeOf<ViewVariant>(), UnsafeUtility.SizeOf<ViewVariantPart>(), UnsafeUtility.SizeOf<ViewPart>(),
+        };
 
         public const int ProbeBatches = 16;
 
@@ -85,7 +97,7 @@ namespace RealPortal.Burst
                 for (int b = 0; b < ProbeBatches && cull == ModeBurst; b++)
                     cull = counts[b];
                 new ProxyCompactJob { Visible = visible, BatchCounts = counts, VisibleCount = total, BatchSize = 0 }.Schedule().Complete();
-                return new[] { cull, total[0] };
+                return new[] { cull, total[0], ProbeViewCull(), ProbeViewEmit() };
             }
             finally
             {
@@ -95,6 +107,157 @@ namespace RealPortal.Burst
                 counts.Dispose();
                 total.Dispose();
             }
+        }
+
+        // The view jobs in probe mode (RangeBase -1) over ProbeBatches indices, scheduled as ScheduleView* schedules them;
+        // every other array one element long (the job reads none of them then).
+        static int ProbeViewCull()
+        {
+            var modes = new NativeArray<int>(ProbeBatches, Allocator.TempJob);
+            var inst = new NativeArray<ViewInst>(1, Allocator.TempJob);
+            var ranges = new NativeArray<ViewRange>(1, Allocator.TempJob);
+            var templates = new NativeArray<ViewTemplate>(1, Allocator.TempJob);
+            var variants = new NativeArray<ViewVariant>(1, Allocator.TempJob);
+            var rowFlags = new NativeArray<byte>(1, Allocator.TempJob);
+            var planes = new NativeArray<Vector4>(1, Allocator.TempJob);
+            var outs = new NativeArray<ViewOut>(1, Allocator.TempJob);
+            try
+            {
+                new ProxyViewCullJob
+                {
+                    Page = inst, Ranges = ranges, Templates = templates, LodSets = templates, Variants = variants, RowFlags = rowFlags, Planes = planes,
+                    Out = outs, Room = modes, RangeBase = -1,
+                }.Schedule(ProbeBatches, 1).Complete();
+                return AllBurst(modes);
+            }
+            finally
+            {
+                modes.Dispose();
+                inst.Dispose();
+                ranges.Dispose();
+                templates.Dispose();
+                variants.Dispose();
+                rowFlags.Dispose();
+                planes.Dispose();
+                outs.Dispose();
+            }
+        }
+
+        static int ProbeViewEmit()
+        {
+            var modes = new NativeArray<int>(ProbeBatches, Allocator.TempJob);
+            var inst = new NativeArray<ViewInst>(1, Allocator.TempJob);
+            var ranges = new NativeArray<ViewRange>(1, Allocator.TempJob);
+            var outs = new NativeArray<ViewOut>(1, Allocator.TempJob);
+            var variants = new NativeArray<ViewVariant>(1, Allocator.TempJob);
+            var variantParts = new NativeArray<ViewVariantPart>(1, Allocator.TempJob);
+            var parts = new NativeArray<ViewPart>(1, Allocator.TempJob);
+            var ints = new NativeArray<int>(1, Allocator.TempJob);
+            var m = new NativeArray<Matrix4x4>(1, Allocator.TempJob);
+            var s = new NativeArray<Vector4>(1, Allocator.TempJob);
+            try
+            {
+                new ProxyViewEmitJob
+                {
+                    Page = inst, Ranges = ranges, Cull = outs, Variants = variants, VariantParts = variantParts, Parts = parts, BatchDraw = ints, Base = ints,
+                    Key = ints, M = m, S = s, Filled = modes, Visible = ints, Casters = ints, SpecialCount = ints, Special = ints, RowDrawn = ints, RangeBase = -1,
+                }.Schedule(ProbeBatches, 1).Complete();
+                return AllBurst(modes);
+            }
+            finally
+            {
+                modes.Dispose();
+                inst.Dispose();
+                ranges.Dispose();
+                outs.Dispose();
+                variants.Dispose();
+                variantParts.Dispose();
+                parts.Dispose();
+                ints.Dispose();
+                m.Dispose();
+                s.Dispose();
+            }
+        }
+
+        static int AllBurst(NativeArray<int> modes)
+        {
+            for (int i = 0; i < modes.Length; i++)
+                if (modes[i] != ModeBurst)
+                    return modes[i];
+            return ModeBurst;
+        }
+
+        // ProxyViewCullJob over `rangeCount` ranges from `rangeBase` of one page (the plugin's ProxyDraw.ProxyCullJob, see
+        // ProxyViewJobs.cs). The plugin's arrays as bytes: page ProxyInst, ranges CullRange, templates and lodSets
+        // ProxyTemplateData, variants ProxyVariantData, outs CullOut. cam = (C', K), prevCam = (previous C', previous K),
+        // light = (the caster sweep, Margin); flags: 1 HasPrev, 2 Animated, 4 Shadows, 8 CameraSideCasts. Main thread; the
+        // arrays belong to the caller until the handle completes.
+        public static JobHandle ScheduleViewCull(NativeArray<byte> page, NativeArray<byte> ranges, NativeArray<byte> templates, NativeArray<byte> lodSets,
+            NativeArray<byte> variants, NativeArray<byte> rowFlags, NativeArray<Vector4> planes, NativeArray<byte> outs, NativeArray<int> room,
+            int rangeBase, int rangeCount, int casterPlanes, int maxLod, uint skip, Vector4 cam, Vector4 prevCam, Vector4 light, int flags,
+            JobHandle dependsOn)
+        {
+            return new ProxyViewCullJob
+            {
+                Page = page.Reinterpret<ViewInst>(1),
+                Ranges = ranges.Reinterpret<ViewRange>(1),
+                Templates = templates.Reinterpret<ViewTemplate>(1),
+                LodSets = lodSets.Reinterpret<ViewTemplate>(1),
+                Variants = variants.Reinterpret<ViewVariant>(1),
+                RowFlags = rowFlags,
+                Planes = planes,
+                Out = outs.Reinterpret<ViewOut>(1),
+                Room = room,
+                RangeBase = rangeBase,
+                CasterPlanes = casterPlanes,
+                MaxLod = maxLod,
+                Skip = skip,
+                Cam = new Vector3(cam.x, cam.y, cam.z),
+                K = cam.w,
+                PrevCam = new Vector3(prevCam.x, prevCam.y, prevCam.z),
+                PrevK = prevCam.w,
+                Light = new Vector3(light.x, light.y, light.z),
+                Margin = light.w,
+                HasPrev = (flags & 1) != 0,
+                Animated = (flags & 2) != 0,
+                Shadows = (flags & 4) != 0,
+                CameraSideCasts = (flags & 8) != 0,
+            }.Schedule(rangeCount, 1, dependsOn);
+        }
+
+        // ProxyViewEmitJob over `rangeCount` ranges from `rangeBase` of one page (the plugin's ProxyDraw.EmitJob). As bytes:
+        // page ProxyInst, ranges CullRange, cull CullOut, variants ProxyVariantData, variantParts ProxyVariantPart, parts
+        // ProxyPartData. Main thread; the arrays belong to the caller until the handle completes.
+        public static JobHandle ScheduleViewEmit(NativeArray<byte> page, NativeArray<byte> ranges, NativeArray<byte> cull, NativeArray<byte> variants,
+            NativeArray<byte> variantParts, NativeArray<byte> parts, NativeArray<int> batchDraw, NativeArray<int> bases, NativeArray<int> key,
+            NativeArray<Matrix4x4> m, NativeArray<Vector4> s, NativeArray<int> filled, NativeArray<int> visible, NativeArray<int> casters,
+            NativeArray<int> specialCount, NativeArray<int> special, NativeArray<int> rowDrawn, int rangeBase, int rangeCount, int mask, int frame,
+            bool obliqueClip, JobHandle dependsOn)
+        {
+            return new ProxyViewEmitJob
+            {
+                Page = page.Reinterpret<ViewInst>(1),
+                Ranges = ranges.Reinterpret<ViewRange>(1),
+                Cull = cull.Reinterpret<ViewOut>(1),
+                Variants = variants.Reinterpret<ViewVariant>(1),
+                VariantParts = variantParts.Reinterpret<ViewVariantPart>(1),
+                Parts = parts.Reinterpret<ViewPart>(1),
+                BatchDraw = batchDraw,
+                Base = bases,
+                Key = key,
+                M = m,
+                S = s,
+                Filled = filled,
+                Visible = visible,
+                Casters = casters,
+                SpecialCount = specialCount,
+                Special = special,
+                RowDrawn = rowDrawn,
+                RangeBase = rangeBase,
+                Mask = mask,
+                Frame = frame,
+                ObliqueClip = obliqueClip,
+            }.Schedule(rangeCount, 1, dependsOn);
         }
 
         // ceil(length / batchSize) without overflow; batchSize > 0.

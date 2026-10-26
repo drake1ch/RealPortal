@@ -85,7 +85,7 @@ namespace RealPortal
 
         // Lab: the virtual path's counters in one line.
         internal static string DescribeVirtual() =>
-            PortalRenderer.DescribeVirtual() + "; " + WindowScreen.DescribeProf() + BenchLine();
+            PortalRenderer.DescribeVirtual() + "; " + WindowScreen.DescribeProf() + "; " + ProxyDraw.DescribeProf() + BenchLine();
 
         static string BenchLine() =>
             $"; content: {WindowScreenContent.LabRenders} renders, last {WindowScreenContent.LabMaps} heightmaps and {WindowScreenContent.LabCore} core renderers, " +

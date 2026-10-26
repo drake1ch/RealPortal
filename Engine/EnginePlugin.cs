@@ -21,7 +21,7 @@ namespace RealPortal.Engine
     {
         public const string Guid = "valheim.realportal.engine";
         public const string Name = "Real Portal Engine";
-        public const string Version = "0.1.0";
+        public const string Version = "0.1.1";
 
         internal static ManualLogSource Log;
         internal static Harmony Harmony;

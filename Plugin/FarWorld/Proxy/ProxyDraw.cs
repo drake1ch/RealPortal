@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using RealPortal.Engine;
 using Unity.Collections;
+using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using UnityEngine;
 using UnityEngine.Rendering;
@@ -85,13 +87,42 @@ namespace RealPortal
         static bool[] s_grouped = new bool[64];
         // Per page group: its first range, its range count and a candidate holding its page.
         static int[] s_groupFirst = new int[64], s_groupCount = new int[64], s_groupCand = new int[64];
-        // Emitted parts (unsorted): their run and matrix.
-        static int[] s_emitRun = new int[1024];
-        static Matrix4x4[] s_emitM = new Matrix4x4[1024];
-        static int s_emits;
-        // Win.Virtual: this cull is a virtual view's (its emitted parts also keep their instance's sphere, sorted along).
+        // Emitted parts (unsorted), all emitted parts s_emits: EmitJob fills each range's room from its base (s_eBase, filled
+        // s_rangeFilled), the main thread then appends from s_eRoom to s_eEnd the parts of the instances left to it (a
+        // cross-fade, LodFadeInOut's fade-in). Per part its key (ProxyVariantPart.Run * 4 + shadow mode for a plain part;
+        // s_keyFade + its fade run for one in a fade), its matrix and its instance's sphere.
+        static NativeArray<int> s_eKey;
+        static NativeArray<Matrix4x4> s_eM;
+        static NativeArray<Vector4> s_eS;
+        static int s_eRoom, s_eEnd, s_emits, s_keyFade, s_rangeCount;
+        // Per range: its room (CullJob: the part count of every drawn instance's variant), its base, what EmitJob filled,
+        // its instances in view and shadows-only, and how many it left to the main thread (their indices in s_special
+        // from the range's Out on).
+        static NativeArray<int> s_rangeRoom, s_rangeBase, s_rangeFilled, s_rangeVis, s_rangeCast, s_rangeSpecial, s_special;
+        // Per registry row, for this view's jobs: a cross-fade running (RowFading), LodFadeInOut's fade-in pending
+        // (RowBorn); set from the view's fades and s_born before the cull, cleared after the emission.
+        static NativeArray<byte> s_rowFlags;
+        const byte RowFading = 1, RowBorn = 2;
+        static readonly List<int> s_flagged = new List<int>();
+        // Fade runs: (part run, shadow mode, fade index) of the parts drawn in a cross-fade, by s_runOf.
+        static int[] s_fadeRunRun = new int[64], s_fadeRunMode = new int[64], s_fadeRunFade = new int[64];
+        static int s_fadeRunCount;
+        // The counting sort: per key its part count, then its run; the keys that have parts this render.
+        static int[] s_keyCount = new int[1024], s_keyRun = new int[1024];
+        static readonly List<int> s_keysUsed = new List<int>(256);
+        // The Burst build of the jobs (BurstBootstrapModule.ViewCull/ViewEmit): 0 not decided yet, 1 used, -1 not (no
+        // library, other layouts, refused by the check); the renders left to check against ours, and our outputs then.
+        static int s_burst, s_verifyLeft = VerifyCulls;
+        const int VerifyCulls = 8;
+        static NativeArray<CullOut> s_chkOut;
+        static NativeArray<int> s_chkRoom, s_chkKey, s_chkFilled, s_chkVis, s_chkCast, s_chkSpecialCount, s_chkSpecial;
+        static NativeArray<Matrix4x4> s_chkM;
+        static NativeArray<Vector4> s_chkS;
+        // Lab: the Burst decision, instances compared and cull answers that differed.
+        internal static string LabBurst = "not decided";
+        internal static long LabBurstChecked, LabBurstDiffer;
+        // Win.Virtual: this cull is a virtual view's.
         static bool s_virtual;
-        static Vector4[] s_emitS = new Vector4[1024];
         static NativeArray<Vector4> s_sortedS;
         // Runs and their keys; the distinct fade values of this render (index 0: none).
         struct Run
@@ -117,8 +148,8 @@ namespace RealPortal
         static int s_mask;
         static bool s_obliqueClip;
 
-        // Per registry row: the last frame a window drew its proxy in view (the handoff asks).
-        static int[] s_rowDrawn = new int[1024];
+        // Per registry row: the last frame a window drew its proxy in view (the handoff asks; EmitJob writes it).
+        static NativeArray<int> s_rowDrawn;
         // Rows that appeared in a built sector (LodFadeInOut's fade-in): when.
         static readonly Dictionary<int, float> s_born = new Dictionary<int, float>();
         static readonly List<int> s_sweepRows = new List<int>();
@@ -309,7 +340,11 @@ namespace RealPortal
         {
             s_views.Clear();
             s_born.Clear();
-            Array.Clear(s_rowDrawn, 0, s_rowDrawn.Length);
+            if (s_rowDrawn.IsCreated)
+                s_rowDrawn.Dispose();
+            if (s_rowFlags.IsCreated)
+                s_rowFlags.Dispose();
+            s_flagged.Clear();
             s_spans.Clear();
             Array.Clear(s_cands, 0, s_cands.Length);
             s_candCount = 0;
@@ -329,6 +364,15 @@ namespace RealPortal
                 s_sorted.Dispose();
             if (s_sortedS.IsCreated)
                 s_sortedS.Dispose();
+            foreach (NativeArray<int> a in new[] { s_eKey, s_rangeRoom, s_rangeBase, s_rangeFilled, s_rangeVis, s_rangeCast, s_rangeSpecial, s_special })
+                if (a.IsCreated)
+                    a.Dispose();
+            s_eKey = s_rangeRoom = s_rangeBase = s_rangeFilled = s_rangeVis = s_rangeCast = s_rangeSpecial = s_special = default;
+            if (s_eM.IsCreated)
+                s_eM.Dispose();
+            if (s_eS.IsCreated)
+                s_eS.Dispose();
+            DisposeChecks();
             s_virtualReady = false;
             VirtualPasses.Clear();
         }
@@ -383,13 +427,62 @@ namespace RealPortal
             if (row < 0)
                 return;
             if (row >= s_rowDrawn.Length)
-            {
-                int size = s_rowDrawn.Length;
-                while (size <= row)
-                    size *= 2;
-                Array.Resize(ref s_rowDrawn, size);
-            }
+                GrowKeep(ref s_rowDrawn, row + 1);
             s_rowDrawn[row] = Time.frameCount;
+        }
+
+        // Room for every registry row in s_rowDrawn before EmitJob writes it.
+        static void EnsureRowDrawn()
+        {
+            SectorRegistry reg = FarProxies.Registry;
+            int need = Math.Max(reg != null ? reg.RowHigh : 0, 1);
+            if (s_rowDrawn.Length < need)
+                GrowKeep(ref s_rowDrawn, need);
+        }
+
+        // s_rowFlags for this view's cull: the rows of its running cross-fades and of LodFadeInOut's pending fade-ins.
+        static void FlagRows(View view)
+        {
+            if (!s_rowFlags.IsCreated)
+                GrowKeep(ref s_rowFlags, 1);
+            foreach (int row in view.Fades.Keys)
+                Flag(row, RowFading);
+            if (s_born.Count > 0)
+                foreach (int row in s_born.Keys)
+                    Flag(row, RowBorn);
+        }
+
+        static void Flag(int row, byte bit)
+        {
+            if (row < 0)
+                return;
+            if (row >= s_rowFlags.Length)
+                GrowKeep(ref s_rowFlags, row + 1);
+            if (s_rowFlags[row] == 0)
+                s_flagged.Add(row);
+            s_rowFlags[row] = (byte)(s_rowFlags[row] | bit);
+        }
+
+        static void UnflagRows()
+        {
+            for (int i = 0; i < s_flagged.Count; i++)
+                s_rowFlags[s_flagged[i]] = 0;
+            s_flagged.Clear();
+        }
+
+        // Grows a persistent array to at least `need`, keeping what it holds (the rest zero).
+        static void GrowKeep<T>(ref NativeArray<T> a, int need) where T : struct
+        {
+            int size = Math.Max(1024, a.Length * 2);
+            while (size < need)
+                size *= 2;
+            var grown = new NativeArray<T>(size, Allocator.Persistent, NativeArrayOptions.ClearMemory);
+            if (a.IsCreated)
+            {
+                NativeArray<T>.Copy(a, grown, a.Length);
+                a.Dispose();
+            }
+            a = grown;
         }
 
         // ---- the handlers ---------------------------------------------------------------------------------------
@@ -495,8 +588,12 @@ namespace RealPortal
                 return false;
             if (culled == 0 || s_emits == 0)
                 return true;
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             Sort();
+            long t1 = System.Diagnostics.Stopwatch.GetTimestamp();
             Submit(cam);
+            LabProf[2] += (t1 - t0) * WindowScreen.TickMs;
+            LabProf[3] += (System.Diagnostics.Stopwatch.GetTimestamp() - t1) * WindowScreen.TickMs;
             return true;
         }
 
@@ -508,7 +605,7 @@ namespace RealPortal
         {
             // A virtual view's runs are recorded right after its own cull, never after another's.
             s_virtualReady = false;
-            if (FarProxies.CollectSpans(far, s_spans) == 0)
+            if (!ProxyTables.BatchDraw.IsCreated || FarProxies.CollectSpans(far, s_spans) == 0)
                 return -1;
             Ensure(ref s_planes, 16);
             s_mask = cullingMask;
@@ -594,13 +691,27 @@ namespace RealPortal
             Ensure(ref s_out, total);
             Ensure(ref s_ranges, s_candCount);
 
+            // What the jobs leave to the main thread, per row: this view's running cross-fades, LodFadeInOut's fade-ins.
+            FlagRows(view);
+            Ensure(ref s_rangeRoom, s_candCount);
+            Ensure(ref s_rangeBase, s_candCount);
+            Ensure(ref s_rangeFilled, s_candCount);
+            Ensure(ref s_rangeVis, s_candCount);
+            Ensure(ref s_rangeCast, s_candCount);
+            Ensure(ref s_rangeSpecial, s_candCount);
+            Ensure(ref s_special, total);
+            EnsureRowDrawn();
+
             var job = new ProxyCullJob
             {
                 Templates = ProxyTables.Templates,
                 LodSets = ProxyTables.LodSets,
+                Variants = ProxyTables.Variants,
+                RowFlags = s_rowFlags,
                 Planes = s_planes,
                 Out = s_out,
                 Ranges = s_ranges,
+                Room = s_rangeRoom,
                 CasterPlanes = casterPlanes,
                 // Win.Virtual: a window drawn without a camera draws the proxies of objects that have their instance too
                 // (its real renderers reach no camera there).
@@ -613,11 +724,12 @@ namespace RealPortal
                 PrevK = hasPrev ? view.PrevK : k,
                 Margin = Margin,
                 HasPrev = hasPrev,
+                Animated = dur > 0f,
                 Shadows = shadows,
                 CameraSideCasts = shadows && (s_obliqueClip || WindowFlags.ExitShadows),
             };
-            // Ranges grouped by page, all written before any job runs; then one job per page (chained: they share the
-            // output), or everything inline when there are few.
+            // Ranges grouped by page, all written before any job runs; then one job per page, side by side (each range
+            // writes its own part of the outputs), or everything inline when there are few.
             Array.Clear(s_grouped, 0, s_candCount);
             int rangeCount = 0, groups = 0;
             for (int i = 0; i < s_candCount; i++)
@@ -640,9 +752,107 @@ namespace RealPortal
                 s_groupCount[groups] = rangeCount - s_groupFirst[groups];
                 groups++;
             }
+            s_rangeCount = rangeCount;
             long j0 = System.Diagnostics.Stopwatch.GetTimestamp();
-            JobHandle chain = default;
             bool inline = total <= InlineCandidates;
+            bool burst = !inline && UseBurst();
+            RunCull(job, groups, inline, burst);
+            if (burst && s_verifyLeft > 0)
+                VerifyCull(job, groups, total, rangeCount);
+            long j1 = System.Diagnostics.Stopwatch.GetTimestamp();
+
+            // Emission: each range's parts into its room (the order of the ranges), by EmitJob.
+            int room = 0;
+            for (int r = 0; r < rangeCount; r++)
+            {
+                s_rangeBase[r] = room;
+                room += s_rangeRoom[r];
+            }
+            Ensure(ref s_eKey, Math.Max(room, 1));
+            Ensure(ref s_eM, Math.Max(room, 1));
+            Ensure(ref s_eS, Math.Max(room, 1));
+            var emit = new EmitJob
+            {
+                Ranges = s_ranges,
+                Cull = s_out,
+                Variants = ProxyTables.Variants,
+                VariantParts = ProxyTables.VariantParts,
+                Parts = ProxyTables.Parts,
+                BatchDraw = ProxyTables.BatchDraw,
+                Base = s_rangeBase,
+                Key = s_eKey,
+                M = s_eM,
+                S = s_eS,
+                Filled = s_rangeFilled,
+                Visible = s_rangeVis,
+                Casters = s_rangeCast,
+                SpecialCount = s_rangeSpecial,
+                Special = s_special,
+                RowDrawn = s_rowDrawn,
+                Mask = s_mask,
+                Frame = Time.frameCount,
+                ObliqueClip = s_obliqueClip,
+            };
+            burst &= s_burst == 1;
+            RunEmit(emit, groups, inline, burst);
+            if (burst && s_verifyLeft > 0)
+                VerifyEmit(emit, groups, room, rangeCount, total);
+
+            // The instances left to the main thread (a cross-fade, LodFadeInOut's fade-in): their parts after the rooms.
+            s_eRoom = s_eEnd = room;
+            s_runCount = 0;
+            s_fadeCount = 1;
+            s_fadeBlocksUsed = 0;
+            s_fadeRunCount = 0;
+            s_keyFade = ProxyTables.RunCount * 4;
+            int visible = 0, casters = 0, emitted = 0;
+            for (int g = 0; g < groups; g++)
+            {
+                NativeArray<ProxyInst> page = s_cands[s_groupCand[g]].Page;
+                for (int r = s_groupFirst[g], end = s_groupFirst[g] + s_groupCount[g]; r < end; r++)
+                {
+                    visible += s_rangeVis[r];
+                    casters += s_rangeCast[r];
+                    emitted += s_rangeFilled[r];
+                    CullRange cr = s_ranges[r];
+                    for (int q = 0, specials = s_rangeSpecial[r]; q < specials; q++)
+                    {
+                        int j = s_special[cr.Out + q];
+                        CullOut o = s_out[cr.Out + j];
+                        ProxyInst inst = page[cr.Start + j];
+                        // (Only a virtual view emits a Created one: its object is there, so its proxy is not one the handoff asks for.)
+                        if (EmitInstance(in inst, o, view, hasPrev, now, dur) && o.Vis == 1 && (inst.Flags & (uint)ProxyFlags.Created) == 0)
+                            MarkDrawn(inst.Row);
+                    }
+                }
+            }
+            s_emits = emitted + s_eEnd - s_eRoom;
+            UnflagRows();
+            Remember(view, camPos, k, now);
+            LabVisible += visible;
+            LabCasters += casters;
+            double cullMs = (j1 - j0) * WindowScreen.TickMs, emitMs = (System.Diagnostics.Stopwatch.GetTimestamp() - j1) * WindowScreen.TickMs;
+            if (virtualView)
+            {
+                WindowScreen.LabProf[0] += cullMs;
+                WindowScreen.LabProf[1] += emitMs;
+            }
+            else
+            {
+                LabProf[0] += cullMs;
+                LabProf[1] += emitMs;
+                LabProfRenders++;
+            }
+            return 1;
+        }
+
+        // ---- the jobs: ours, or the same as Burst code ----------------------------------------------------------------
+
+        // The cull of every page: inline on this thread (few candidates), else one job per page side by side, the engine's
+        // Burst build of it (RealPortal.Burst's ProxyViewCullJob) or ours.
+        static void RunCull(ProxyCullJob job, int groups, bool inline, bool burst)
+        {
+            JobHandle all = default;
             for (int g = 0; g < groups; g++)
             {
                 job.Page = s_cands[s_groupCand[g]].Page;
@@ -654,49 +864,179 @@ namespace RealPortal
                         job.Execute(r);
                 }
                 else
-                    chain = job.Schedule(n, 1, chain);
+                    all = JobHandle.CombineDependencies(all, burst ? BurstCull(job, n) : job.Schedule(n, 1));
             }
             if (!inline)
             {
                 JobHandle.ScheduleBatchedJobs();
-                chain.Complete();
+                all.Complete();
             }
-            long j1 = System.Diagnostics.Stopwatch.GetTimestamp();
+        }
 
-            // Emission: per instance its shown levels and fade values, per part its run.
-            s_emits = 0;
-            s_runCount = 0;
-            s_fadeCount = 1;
-            s_fadeBlocksUsed = 0;
-            int visible = 0, casters = 0;
-            for (int i = 0; i < s_candCount; i++)
+        static void RunEmit(EmitJob emit, int groups, bool inline, bool burst)
+        {
+            JobHandle all = default;
+            for (int g = 0; g < groups; g++)
             {
-                NativeArray<ProxyInst> page = s_cands[i].Page;
-                int start = s_cands[i].Start, count = s_cands[i].Count, outBase = s_candOut[i];
-                for (int j = 0; j < count; j++)
+                emit.Page = s_cands[s_groupCand[g]].Page;
+                emit.RangeBase = s_groupFirst[g];
+                int n = s_groupCount[g];
+                if (inline)
                 {
-                    CullOut o = s_out[outBase + j];
-                    if (o.Vis == 0)
-                        continue;
-                    ProxyInst inst = page[start + j];
-                    if (o.Vis == 1)
-                        visible++;
-                    else
-                        casters++;
-                    // (Only a virtual view emits a Created one: its object is there, so its proxy is not one the handoff asks for.)
-                    if (EmitInstance(in inst, o, view, hasPrev, now, dur) && o.Vis == 1 && (inst.Flags & (uint)ProxyFlags.Created) == 0)
-                        MarkDrawn(inst.Row);
+                    for (int r = 0; r < n; r++)
+                        emit.Execute(r);
                 }
+                else
+                    all = JobHandle.CombineDependencies(all, burst ? BurstEmit(emit, n) : emit.Schedule(n, 1));
             }
-            Remember(view, camPos, k, now);
-            LabVisible += visible;
-            LabCasters += casters;
-            if (virtualView)
+            if (!inline)
             {
-                WindowScreen.LabProf[0] += (j1 - j0) * WindowScreen.TickMs;
-                WindowScreen.LabProf[1] += (System.Diagnostics.Stopwatch.GetTimestamp() - j1) * WindowScreen.TickMs;
+                JobHandle.ScheduleBatchedJobs();
+                all.Complete();
             }
-            return 1;
+        }
+
+        static NativeArray<byte> Bytes<T>(NativeArray<T> a) where T : struct => a.Reinterpret<byte>(UnsafeUtility.SizeOf<T>());
+
+        static JobHandle BurstCull(in ProxyCullJob j, int n) =>
+            BurstBootstrapModule.ViewCull(Bytes(j.Page), Bytes(j.Ranges), Bytes(j.Templates), Bytes(j.LodSets), Bytes(j.Variants), j.RowFlags, j.Planes,
+                Bytes(j.Out), j.Room, j.RangeBase, n, j.CasterPlanes, j.MaxLod, j.Skip, new Vector4(j.Cam.x, j.Cam.y, j.Cam.z, j.K),
+                new Vector4(j.PrevCam.x, j.PrevCam.y, j.PrevCam.z, j.PrevK), new Vector4(j.Light.x, j.Light.y, j.Light.z, j.Margin),
+                (j.HasPrev ? 1 : 0) | (j.Animated ? 2 : 0) | (j.Shadows ? 4 : 0) | (j.CameraSideCasts ? 8 : 0), default);
+
+        static JobHandle BurstEmit(in EmitJob e, int n) =>
+            BurstBootstrapModule.ViewEmit(Bytes(e.Page), Bytes(e.Ranges), Bytes(e.Cull), Bytes(e.Variants), Bytes(e.VariantParts), Bytes(e.Parts), e.BatchDraw,
+                e.Base, e.Key, e.M, e.S, e.Filled, e.Visible, e.Casters, e.SpecialCount, e.Special, e.RowDrawn, e.RangeBase, n, e.Mask, e.Frame,
+                e.ObliqueClip, default);
+
+        // Whether the Burst build of the jobs is used: decided at the first cull with jobs (the engine activates its library
+        // then, once per session), and only while the engine's switch stays on.
+        static bool UseBurst()
+        {
+            if (s_burst == 0)
+            {
+                s_burst = -1;
+                int[] sizes;
+                if (!BurstBootstrapModule.Ensure())
+                    LabBurst = "off: " + BurstBootstrapModule.Status;
+                else if (BurstBootstrapModule.ViewCull == null || BurstBootstrapModule.ViewEmit == null || (sizes = BurstBootstrapModule.ViewSizes) == null)
+                    LabBurst = "off: the library has no view jobs";
+                else if (sizes.Length < 7 || sizes[0] != UnsafeUtility.SizeOf<ProxyInst>() || sizes[1] != UnsafeUtility.SizeOf<CullRange>() ||
+                         sizes[2] != UnsafeUtility.SizeOf<CullOut>() || sizes[3] != UnsafeUtility.SizeOf<ProxyTemplateData>() ||
+                         sizes[4] != UnsafeUtility.SizeOf<ProxyVariantData>() || sizes[5] != UnsafeUtility.SizeOf<ProxyVariantPart>() ||
+                         sizes[6] != UnsafeUtility.SizeOf<ProxyPartData>())
+                    LabBurst = "off: the library mirrors other table layouts (" + string.Join("/", sizes) + ")";
+                else
+                {
+                    s_burst = 1;
+                    LabBurst = "on, checking";
+                }
+                Plugin.Log.LogInfo("FarProxies: Burst jobs " + LabBurst);
+            }
+            return s_burst == 1 && BurstBootstrapModule.BurstActive;
+        }
+
+        // The first VerifyCulls Burst culls run our jobs too, into their own arrays, and compare: the cull may differ only
+        // where a value lands within a float step of a test (at most one instance in a thousand), the emission of the same
+        // cull not at all (matrices to a float step). Anything more and our jobs run from then on.
+        static void VerifyCull(ProxyCullJob job, int groups, int total, int rangeCount)
+        {
+            Ensure(ref s_chkOut, total);
+            Ensure(ref s_chkRoom, rangeCount);
+            job.Out = s_chkOut;
+            job.Room = s_chkRoom;
+            RunCull(job, groups, false, false);
+            int differ = 0;
+            for (int i = 0; i < total; i++)
+            {
+                CullOut a = s_out[i], b = s_chkOut[i];
+                if (a.Vis != b.Vis || a.Lod != b.Lod || a.Prev != b.Prev || a.Pad != b.Pad || Mathf.Abs(a.Fade - b.Fade) > 1e-4f)
+                    differ++;
+            }
+            LabBurstChecked += total;
+            LabBurstDiffer += differ;
+            if (differ * 1000L > total)
+                RefuseBurst($"the Burst cull differs from ours on {differ} of {total} instances");
+        }
+
+        static void VerifyEmit(EmitJob emit, int groups, int room, int rangeCount, int total)
+        {
+            Ensure(ref s_chkKey, Math.Max(room, 1));
+            Ensure(ref s_chkM, Math.Max(room, 1));
+            Ensure(ref s_chkS, Math.Max(room, 1));
+            Ensure(ref s_chkFilled, rangeCount);
+            Ensure(ref s_chkVis, rangeCount);
+            Ensure(ref s_chkCast, rangeCount);
+            Ensure(ref s_chkSpecialCount, rangeCount);
+            Ensure(ref s_chkSpecial, total);
+            emit.Key = s_chkKey;
+            emit.M = s_chkM;
+            emit.S = s_chkS;
+            emit.Filled = s_chkFilled;
+            emit.Visible = s_chkVis;
+            emit.Casters = s_chkCast;
+            emit.SpecialCount = s_chkSpecialCount;
+            emit.Special = s_chkSpecial;
+            RunEmit(emit, groups, false, false);
+            string differs = null;
+            for (int r = 0; r < rangeCount && differs == null; r++)
+            {
+                if (s_rangeFilled[r] != s_chkFilled[r] || s_rangeVis[r] != s_chkVis[r] || s_rangeCast[r] != s_chkCast[r] || s_rangeSpecial[r] != s_chkSpecialCount[r])
+                {
+                    differs = $"range {r}: parts {s_rangeFilled[r]}/{s_chkFilled[r]}, special {s_rangeSpecial[r]}/{s_chkSpecialCount[r]}";
+                    break;
+                }
+                for (int p = s_rangeBase[r], end = p + s_rangeFilled[r]; p < end; p++)
+                    if (s_eKey[p] != s_chkKey[p] || s_eS[p] != s_chkS[p] || !Near(s_eM[p], s_chkM[p]))
+                    {
+                        differs = $"range {r}, part {p - s_rangeBase[r]}: key {s_eKey[p]}/{s_chkKey[p]}";
+                        break;
+                    }
+                for (int q = 0, at = s_ranges[r].Out; q < s_rangeSpecial[r] && differs == null; q++)
+                    if (s_special[at + q] != s_chkSpecial[at + q])
+                        differs = $"range {r}: special {q}";
+            }
+            if (differs != null)
+            {
+                RefuseBurst("the Burst emission differs from ours (" + differs + ")");
+                return;
+            }
+            if (--s_verifyLeft == 0)
+            {
+                LabBurst = $"on (checked against ours: {VerifyCulls} renders, {LabBurstChecked} instances, {LabBurstDiffer} cull answers a float step apart)";
+                Plugin.Log.LogInfo("FarProxies: Burst jobs " + LabBurst);
+                DisposeChecks();
+            }
+        }
+
+        static bool Near(in Matrix4x4 a, in Matrix4x4 b)
+        {
+            for (int i = 0; i < 16; i++)
+                if (Mathf.Abs(a[i] - b[i]) > 1e-5f * (1f + Mathf.Abs(a[i])))
+                    return false;
+            return true;
+        }
+
+        static void RefuseBurst(string why)
+        {
+            s_burst = -1;
+            LabBurst = "refused: " + why;
+            Plugin.Log.LogWarning("FarProxies: " + why + "; the proxies' own jobs run instead.");
+            DisposeChecks();
+        }
+
+        static void DisposeChecks()
+        {
+            foreach (NativeArray<int> a in new[] { s_chkRoom, s_chkKey, s_chkFilled, s_chkVis, s_chkCast, s_chkSpecialCount, s_chkSpecial })
+                if (a.IsCreated)
+                    a.Dispose();
+            s_chkRoom = s_chkKey = s_chkFilled = s_chkVis = s_chkCast = s_chkSpecialCount = s_chkSpecial = default;
+            if (s_chkOut.IsCreated)
+                s_chkOut.Dispose();
+            if (s_chkM.IsCreated)
+                s_chkM.Dispose();
+            if (s_chkS.IsCreated)
+                s_chkS.Dispose();
         }
 
         static void Remember(View view, Vector3 camPos, float k, float now)
@@ -853,44 +1193,41 @@ namespace RealPortal
                 // Out of view: a caster only. Two-sided stays two-sided where its renderer would keep its mode (outside the
                 // frustum, or behind the exit under the oblique clip); HideBehindExit makes it ShadowsOnly.
                 mode = batch.Shadows == ShadowCastingMode.TwoSided && (vis == 2 || s_obliqueClip) ? ShadowCastingMode.TwoSided : ShadowCastingMode.ShadowsOnly;
-            int fade = x == 0f ? 0 : FadeIndex(x);
-            long key = (long)vp.Batch | ((long)vp.Mpb << 20) | ((long)mode << 40) | ((long)fade << 42);
-            if (!s_runOf.TryGetValue(key, out int run))
+            // A plain part goes with EmitJob's (its run, its mode); one in a fade into a fade run of its own value.
+            int key;
+            if (x == 0f)
+                key = vp.Run * 4 + (int)mode;
+            else
             {
-                run = s_runCount++;
-                if (run == s_runs.Length)
+                int fade = FadeIndex(x);
+                long fk = (long)vp.Run | ((long)mode << 32) | ((long)fade << 34);
+                if (!s_runOf.TryGetValue(fk, out int fr))
                 {
-                    Array.Resize(ref s_runs, run * 2);
-                    Array.Resize(ref s_farRuns, run * 2);
+                    fr = s_fadeRunCount++;
+                    if (fr == s_fadeRunRun.Length)
+                    {
+                        Array.Resize(ref s_fadeRunRun, fr * 2);
+                        Array.Resize(ref s_fadeRunMode, fr * 2);
+                        Array.Resize(ref s_fadeRunFade, fr * 2);
+                    }
+                    s_fadeRunRun[fr] = vp.Run;
+                    s_fadeRunMode[fr] = (int)mode;
+                    s_fadeRunFade[fr] = fade;
+                    s_runOf.Add(fk, fr);
                 }
-                s_runs[run] = new Run
-                {
-                    Batch = vp.Batch, Mpb = vp.Mpb, Fade = fade, Mode = mode,
-                    Min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue), Max = new Vector3(float.MinValue, float.MinValue, float.MinValue),
-                };
-                s_runOf.Add(key, run);
+                key = s_keyFade + fr;
             }
-            ref Run r = ref s_runs[run];
-            r.Count++;
+            int e = s_eEnd++;
+            if (e >= s_eKey.Length)
+            {
+                GrowKeep(ref s_eKey, e + 1);
+                GrowKeep(ref s_eM, e + 1);
+                GrowKeep(ref s_eS, e + 1);
+            }
+            s_eKey[e] = key;
+            s_eM[e] = inst.Root * ProxyTables.Parts[vp.Part].Local;
             Vector3 c = inst.Center;
-            float rad = inst.Radius;
-            r.Min = Vector3.Min(r.Min, new Vector3(c.x - rad, c.y - rad, c.z - rad));
-            r.Max = Vector3.Max(r.Max, new Vector3(c.x + rad, c.y + rad, c.z + rad));
-            int e = s_emits++;
-            if (e == s_emitRun.Length)
-            {
-                Array.Resize(ref s_emitRun, e * 2);
-                Array.Resize(ref s_emitM, e * 2);
-            }
-            s_emitRun[e] = run;
-            s_emitM[e] = inst.Root * ProxyTables.Parts[vp.Part].Local;
-            // Win.Virtual: its instance's sphere, for the cascades' caster tests.
-            if (s_virtual)
-            {
-                if (e >= s_emitS.Length)
-                    Array.Resize(ref s_emitS, s_emitRun.Length);
-                s_emitS[e] = new Vector4(c.x, c.y, c.z, rad);
-            }
+            s_eS[e] = new Vector4(c.x, c.y, c.z, inst.Radius);
             return true;
         }
 
@@ -908,27 +1245,63 @@ namespace RealPortal
 
         // ---- runs ------------------------------------------------------------------------------------------------
 
-        // Counting sort of the emitted matrices by run into one array; the runs cut from it as FarRuns.
+        // Counting sort of the emitted parts by key into one array (with their spheres), a run per key that has any, in key
+        // order; the runs cut from it as FarRuns.
         static void Sort()
         {
-            Ensure(ref s_sorted, s_emits);
-            if (s_virtual)
-                Ensure(ref s_sortedS, s_emits);
+            int dense = s_keyFade, keys = dense + s_fadeRunCount;
+            if (s_keyCount.Length < keys)
+            {
+                int size = Math.Max(keys, s_keyCount.Length * 2);
+                s_keyCount = new int[size];
+                s_keyRun = new int[size];
+            }
+            Array.Clear(s_keyCount, 0, keys);
+            s_keysUsed.Clear();
+            for (int r = 0; r < s_rangeCount; r++)
+                for (int p = s_rangeBase[r], end = p + s_rangeFilled[r]; p < end; p++)
+                    Count(s_eKey[p]);
+            for (int p = s_eRoom; p < s_eEnd; p++)
+                Count(s_eKey[p]);
+            s_keysUsed.Sort();
+            s_runCount = 0;
             int at = 0;
-            for (int r = 0; r < s_runCount; r++)
+            for (int u = 0; u < s_keysUsed.Count; u++)
             {
-                s_runs[r].Start = at;
-                s_runs[r].Cursor = 0;
-                at += s_runs[r].Count;
+                int key = s_keysUsed[u], n = s_keyCount[key];
+                int run = s_runCount++;
+                if (run == s_runs.Length)
+                {
+                    Array.Resize(ref s_runs, run * 2);
+                    Array.Resize(ref s_farRuns, run * 2);
+                }
+                int partRun, mode, fade = 0;
+                if (key < dense)
+                {
+                    partRun = key >> 2;
+                    mode = key & 3;
+                }
+                else
+                {
+                    partRun = s_fadeRunRun[key - dense];
+                    mode = s_fadeRunMode[key - dense];
+                    fade = s_fadeRunFade[key - dense];
+                }
+                s_runs[run] = new Run
+                {
+                    Batch = ProxyTables.RunBatch(partRun), Mpb = ProxyTables.RunMpb(partRun), Fade = fade, Mode = (ShadowCastingMode)mode, Count = n, Start = at,
+                    Min = new Vector3(float.MaxValue, float.MaxValue, float.MaxValue), Max = new Vector3(float.MinValue, float.MinValue, float.MinValue),
+                };
+                s_keyRun[key] = run;
+                at += n;
             }
-            for (int e = 0; e < s_emits; e++)
-            {
-                ref Run r = ref s_runs[s_emitRun[e]];
-                int to = r.Start + r.Cursor++;
-                s_sorted[to] = s_emitM[e];
-                if (s_virtual)
-                    s_sortedS[to] = s_emitS[e];
-            }
+            Ensure(ref s_sorted, at);
+            Ensure(ref s_sortedS, at);
+            for (int r = 0; r < s_rangeCount; r++)
+                for (int p = s_rangeBase[r], end = p + s_rangeFilled[r]; p < end; p++)
+                    Place(p);
+            for (int p = s_eRoom; p < s_eEnd; p++)
+                Place(p);
             int version = FarProxies.Version;
             for (int i = 0; i < s_runCount; i++)
             {
@@ -951,6 +1324,24 @@ namespace RealPortal
                 };
             }
             LabRuns += s_runCount;
+        }
+
+        static void Count(int key)
+        {
+            if (s_keyCount[key]++ == 0)
+                s_keysUsed.Add(key);
+        }
+
+        // Part p to its run's next place, its sphere into the run's bounds.
+        static void Place(int p)
+        {
+            ref Run r = ref s_runs[s_keyRun[s_eKey[p]]];
+            int to = r.Start + r.Cursor++;
+            s_sorted[to] = s_eM[p];
+            Vector4 s = s_eS[p];
+            s_sortedS[to] = s;
+            r.Min = Vector3.Min(r.Min, new Vector3(s.x - s.w, s.y - s.w, s.z - s.w));
+            r.Max = Vector3.Max(r.Max, new Vector3(s.x + s.w, s.y + s.w, s.z + s.w));
         }
 
         static void Submit(Camera cam)
@@ -1282,6 +1673,16 @@ namespace RealPortal
         internal static int LastRunCount => s_runCount;
         internal static FarRun LastRun(int i) => s_farRuns[i];
 
+        // Lab: main-thread ms of the camera renders' proxies by part, summed over LabProfRenders (renders that culled any
+        // candidate): the cull job, the emission, the sort, the submission.
+        internal static readonly double[] LabProf = new double[4];
+        internal static long LabProfRenders;
+
+        internal static string DescribeProf() =>
+            LabProfRenders == 0 ? "proxies per camera render: none" :
+            $"proxies per camera render (ms, {LabProfRenders} renders): cull job {LabProf[0] / LabProfRenders:0.000} emit {LabProf[1] / LabProfRenders:0.000} " +
+            $"sort {LabProf[2] / LabProfRenders:0.000} submit {LabProf[3] / LabProfRenders:0.000}; Burst {LabBurst}";
+
         internal static string Describe() =>
             $"drawn into {LabRenders} renders ({LabCandidates} candidates, {LabVisible} in view, {LabCasters} shadow casters only, {LabFading} fading, " +
             $"{LabRuns} runs, {LabSpansCulled} spans culled whole, {LabErrors} errors), views {s_views.Count}, born {s_born.Count}, materials " +
@@ -1304,11 +1705,92 @@ namespace RealPortal
 
         // Per instance: Vis 0 not drawn, 1 in view, 2 a caster outside the view, 3 a caster on the camera's side of the exit;
         // Lod the level (NoLevel without a LODGroup, Culled), Prev the level at the view's previous render; Fade the
-        // fadeTransitionWidth band's value (0: none).
+        // fadeTransitionWidth band's value (0: none); Pad 1: left to the main thread's EmitInstance (ProxyCullJob.Special).
         internal struct CullOut
         {
             public byte Vis, Lod, Prev, Pad;
             public float Fade;
+        }
+
+        // Per range, its instances culled in (CullOut.Vis) that the main thread is not left (CullOut.Pad 0): their target
+        // level alone with no fade value, each part of it into the range's room from Base: its key (run * 4 + shadow mode,
+        // the mode as Emit picks it), matrix and its instance's sphere; Filled the parts written, Visible/Casters its
+        // instances in view and shadows-only, SpecialCount the instances left (their indices in Special from the range's
+        // Out on); RowDrawn the frame for a row whose proxy it drew in view (none for a Created one).
+        struct EmitJob : IJobParallelFor
+        {
+            [ReadOnly] public NativeArray<ProxyInst> Page;
+            [ReadOnly] public NativeArray<CullRange> Ranges;
+            [ReadOnly] public NativeArray<CullOut> Cull;
+            [ReadOnly] public NativeArray<ProxyVariantData> Variants;
+            [ReadOnly] public NativeArray<ProxyVariantPart> VariantParts;
+            [ReadOnly] public NativeArray<ProxyPartData> Parts;
+            [ReadOnly] public NativeArray<int> BatchDraw;
+            [ReadOnly] public NativeArray<int> Base;
+            // (Every page's job of one cull writes its own ranges' parts of these at the same time.)
+            [NativeDisableParallelForRestriction, NativeDisableContainerSafetyRestriction] public NativeArray<int> Key;
+            [NativeDisableParallelForRestriction, NativeDisableContainerSafetyRestriction] public NativeArray<Matrix4x4> M;
+            [NativeDisableParallelForRestriction, NativeDisableContainerSafetyRestriction] public NativeArray<Vector4> S;
+            [NativeDisableParallelForRestriction, NativeDisableContainerSafetyRestriction] public NativeArray<int> Filled, Visible, Casters, SpecialCount, Special, RowDrawn;
+            public int RangeBase, Mask, Frame;
+            public bool ObliqueClip;
+
+            public void Execute(int index)
+            {
+                int ri = RangeBase + index;
+                CullRange r = Ranges[ri];
+                int at = Base[ri], filled = 0, visible = 0, casters = 0, special = 0;
+                for (int i = 0; i < r.Count; i++)
+                {
+                    CullOut o = Cull[r.Out + i];
+                    if (o.Vis == 0)
+                        continue;
+                    if (o.Vis == 1)
+                        visible++;
+                    else
+                        casters++;
+                    if (o.Pad != 0)
+                    {
+                        Special[r.Out + special++] = i;
+                        continue;
+                    }
+                    ProxyInst inst = Page[r.Start + i];
+                    ProxyVariantData v = Variants[inst.Variant];
+                    var sphere = new Vector4(inst.Center.x, inst.Center.y, inst.Center.z, inst.Radius);
+                    bool any = false;
+                    for (int k = v.PartStart, end = v.PartStart + v.PartCount; k < end; k++)
+                    {
+                        ProxyVariantPart vp = VariantParts[k];
+                        // A level culled shows only the parts in every level, as EmitInstance's mask test.
+                        if (o.Lod != NoLevel && vp.LodMask != ProxyPartData.LodAll && !(o.Lod < 8 && (vp.LodMask & (1 << o.Lod)) != 0))
+                            continue;
+                        int bd = (uint)vp.Batch < (uint)BatchDraw.Length ? BatchDraw[vp.Batch] : -1;
+                        if (bd < 0)
+                            continue;
+                        int layer = bd & 0xFF, shadows = bd >> 8;
+                        if (layer >= 32 || (Mask & (1 << layer)) == 0)
+                            continue;
+                        int mode;
+                        if (o.Vis == 1)
+                            mode = shadows;
+                        else if (shadows == (int)ShadowCastingMode.Off)
+                            continue;
+                        else
+                            mode = shadows == (int)ShadowCastingMode.TwoSided && (o.Vis == 2 || ObliqueClip) ? (int)ShadowCastingMode.TwoSided : (int)ShadowCastingMode.ShadowsOnly;
+                        int e = at + filled++;
+                        Key[e] = vp.Run * 4 + mode;
+                        M[e] = inst.Root * Parts[vp.Part].Local;
+                        S[e] = sphere;
+                        any = true;
+                    }
+                    if (any && o.Vis == 1 && (inst.Flags & (uint)ProxyFlags.Created) == 0 && (uint)inst.Row < (uint)RowDrawn.Length)
+                        RowDrawn[inst.Row] = Frame;
+                }
+                Filled[ri] = filled;
+                Visible[ri] = visible;
+                Casters[ri] = casters;
+                SpecialCount[ri] = special;
+            }
         }
 
         // Planes: [0, 6) the view, 6 the exit (positive where the window shows), [7, 7 + CasterPlanes) the caster volume.
@@ -1318,12 +1800,18 @@ namespace RealPortal
             [ReadOnly] public NativeArray<CullRange> Ranges;
             [ReadOnly] public NativeArray<ProxyTemplateData> Templates;
             [ReadOnly] public NativeArray<ProxyTemplateData> LodSets;
+            [ReadOnly] public NativeArray<ProxyVariantData> Variants;
+            [ReadOnly] public NativeArray<byte> RowFlags;
             [ReadOnly] public NativeArray<Vector4> Planes;
-            [NativeDisableParallelForRestriction] public NativeArray<CullOut> Out;
+            // (Every page's job of one cull writes its own ranges' parts of these at the same time.)
+            [NativeDisableParallelForRestriction, NativeDisableContainerSafetyRestriction] public NativeArray<CullOut> Out;
+            // Per range: the part count of its drawn instances' variants (EmitJob's room).
+            [NativeDisableParallelForRestriction, NativeDisableContainerSafetyRestriction] public NativeArray<int> Room;
             public int RangeBase, CasterPlanes, MaxLod;
             public Vector3 Cam, PrevCam, Light;
             public float K, PrevK, Margin;
-            public bool HasPrev, Shadows, CameraSideCasts;
+            // Animated: the game's cross-fade has a duration (EmitInstance's dur > 0).
+            public bool HasPrev, Animated, Shadows, CameraSideCasts;
             // The flags that leave an instance out (Created | Hidden; a virtual view, Win.Virtual: Hidden alone).
             public uint Skip;
 
@@ -1331,6 +1819,7 @@ namespace RealPortal
             {
                 CullRange r = Ranges[RangeBase + index];
                 uint skip = Skip;
+                int room = 0;
                 for (int i = 0; i < r.Count; i++)
                 {
                     ProxyInst inst = Page[r.Start + i];
@@ -1351,6 +1840,7 @@ namespace RealPortal
                         o.Vis = vis;
                         if (vis != 0)
                         {
+                            room += Variants[inst.Variant].PartCount;
                             ProxyTemplateData td = inst.LodSet >= 0 ? LodSets[inst.LodSet] : Templates[inst.Template];
                             if (td.LodCount == 0)
                                 o.Lod = o.Prev = NoLevel;
@@ -1358,11 +1848,24 @@ namespace RealPortal
                             {
                                 o.Lod = Select(in td, inst.LodSize, Vector3.Distance(Cam, inst.LodRef), K, out o.Fade);
                                 o.Prev = HasPrev ? Select(in td, inst.LodSize, Vector3.Distance(PrevCam, inst.LodRef), PrevK, out _) : o.Lod;
+                                o.Pad = Special(in td, in o, (uint)inst.Row < (uint)RowFlags.Length ? RowFlags[inst.Row] : (byte)0) ? (byte)1 : (byte)0;
                             }
                         }
                     }
                     Out[r.Out + i] = o;
                 }
+                Room[RangeBase + index] = room;
+            }
+
+            // What EmitInstance must draw on the main thread: anything but its target level alone with no fade value
+            // (LodFadeInOut's fade-in pending, an animated cross-fade running or starting, a fadeTransitionWidth band).
+            bool Special(in ProxyTemplateData td, in CullOut o, byte rowFlags)
+            {
+                if (td.LodFadeInOut && (rowFlags & RowBorn) != 0)
+                    return true;
+                if (td.FadeMode == (int)LODFadeMode.CrossFade && td.AnimateCrossFading && Animated)
+                    return (rowFlags & RowFading) != 0 || o.Prev != o.Lod;
+                return td.FadeMode == (int)LODFadeMode.CrossFade && o.Lod != Culled && o.Fade > 0f;
             }
 
             bool Inside(Vector3 c, float rad)
