@@ -19,7 +19,7 @@ Portals you can **see through** and **walk through**, like in *Portal*. The open
 
 Install with r2modman / Thunderstore Mod Manager. By hand: put `RealPortal.dll`, `realportal.bundle`, `RealPortalEngine.dll` and the three `RealPortal.Burst*` files together into `BepInEx/plugins/RealPortal/`, and `RealPortal.Preloader.dll` into `BepInEx/patchers/`.
 
-The package also brings **Real Portal Engine**, a helper plugin with the optimizations the windows rely on (and a few for the game itself, such as saving the world in the background). Each of them can be switched off in `BepInEx/config/valheim.realportal.engine.cfg`.
+The package also brings **Real Portal Engine**, a helper plugin with the optimizations the windows rely on (and a few for the game itself). Each of them can be switched off in `BepInEx/config/valheim.realportal.engine.cfg`.
 
 **Multiplayer:** install it on the server and on every player. A player on a server without the mod still gets windows, showing only what their game already knows about the other side.
 

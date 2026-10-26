@@ -18,7 +18,7 @@ Portal v2: журнал изменений ZDO с препроцессором (
 (`CrowdAlloc`, `UiAlloc`), фазы ИИ и индекс зон эффектов (`AiStagger`, `AreaIndex`), бюджет появления и удаления
 объектов (`SpawnBudget`), LOD частиц и редкие рендеры (`ParticleLod`, `PeriodicRender`), подписки и простаивающая
 синхронизация (`DelegateFanout`, `SyncIdle`), таймеры костров и туман карты (`TimerJitter`, `MinimapFog`), шаги и тени
-(`FootstepCull`, `ShadowCull`), сохранение мира и профиля (`SaveSnapshot`, `ProfileSaveAsync`). Мерить — общими сценариями лаборатории (`horde`, `raid`, `fxstorm`, `bigbase`,
+(`FootstepCull`, `ShadowCull`). Сохранение мира и профиля (`SaveSnapshot`, `ProfileSaveAsync`) убрано из движка 26.10 по просьбе модератора Thunderstore (сохранения не дело мода порталов); исходник в `Backups\removed_save_module_20261026`. Мерить — общими сценариями лаборатории (`horde`, `raid`, `fxstorm`, `bigbase`,
 `aoekill`, `hoard`, `arrive`, `savetest`; `Lab\LabGeneral.cs`, «Общие сценарии» ниже и `Bench\README.md`).
 
 Ничего из этого ещё не запускалось в игре. Всё ниже, что сказано про выигрыш, — оценка; проверять в лаборатории (см.
@@ -1161,6 +1161,8 @@ off & feat IdleSoundCull off"` против без; `Instantiate` в секун�
 Ранжирование: зал с 30–60 факелами ночью, настройка теней точечных 1 и 2, снимки лицом и спиной; `LightSetMismatches` = 0.
 
 ### SaveSnapshot, ProfileSaveAsync и SaveVerify (ранг 10)
+
+**Убрано из движка 26.10** (просьба модератора Thunderstore: сохранения — отдельный мод). Описание ниже — для истории; исходник в `Backups\removed_save_module_20261026\SaveSnapshotModule.cs`.
 
 **Проблема.** Автосохранение на мире лаборатории (326 тыс. ZDO, `savetest mode=auto`): кадр сохранения 260–310 мс.
 Из них `Game.SavePlayerProfile` 192–203 мс, из которых 190 мс — `Minimap.SaveMapData` (2 × size² вызовов

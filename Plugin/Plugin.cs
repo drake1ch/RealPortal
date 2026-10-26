@@ -23,7 +23,7 @@ namespace RealPortal
         public const string Guid = "valheim.realportal";
         public const string EngineGuid = "valheim.realportal.engine";
         public const string Name = "Real Portal";
-        public const string Version = "1.0.5";
+        public const string Version = "1.0.6";
 
         internal const string BundleFile = "realportal.bundle";
         internal const string ShaderAsset = "PortalWindow";

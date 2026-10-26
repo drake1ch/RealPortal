@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.6
+
+- Real Portal Engine 0.1.2 no longer changes how the game saves: the background world and character autosave is gone, saving is the game's own again. It does not belong in a portal mod.
+
 ## 1.0.5
 
 - **Faster windows.** Each window's far side costs less to draw: its static objects (trees, rocks, buildings drawn from the game's own meshes) are now sorted out on several threads at once, and as compiled Burst code with the library that comes with the mod, about a third of the time they took per window. The picture is the same; if the library cannot load, the same work runs as plain code.
